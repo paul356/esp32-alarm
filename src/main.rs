@@ -156,7 +156,7 @@ fn main() -> Result<()> {
                 // Set repeat count to the current hour and frequency to 2000Hz
                 if let Err(e) = buzzer_tx.send(BuzzerMessage::PlayAlarm {
                     repeat_count: hours as u8,
-                    frequency: 2000,
+                    frequency: 2300,
                 }) {
                     log::error!("Failed to send alarm to buzzer thread: {:?}", e);
                 }
@@ -170,7 +170,7 @@ fn main() -> Result<()> {
                 // Send alarm message to buzzer thread with repeat count 3 and frequency 2600Hz
                 if let Err(e) = buzzer_tx.send(BuzzerMessage::PlayAlarm {
                     repeat_count: 3,
-                    frequency: 2600,
+                    frequency: 2800,
                 }) {
                     log::error!("Failed to send 10-min alarm to buzzer thread: {:?}", e);
                 }
