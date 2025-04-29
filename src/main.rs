@@ -1,16 +1,16 @@
 use anyhow::Result;
-use esp_idf_svc::hal as hal;
-use hal::gpio::{Output, PinDriver, OutputPin};
-use hal::peripherals::Peripherals;
-use hal::peripheral::Peripheral;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
+use esp_idf_svc::hal;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sntp::{EspSntp, SyncStatus};
 use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 use esp_idf_svc::wifi::{ClientConfiguration, Configuration};
-use std::time::{Duration, SystemTime};
-use std::thread;
+use hal::gpio::{Output, OutputPin, PinDriver};
+use hal::peripheral::Peripheral;
+use hal::peripherals::Peripherals;
 use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::{Duration, SystemTime};
 
 // Configuration for WiFi connection
 const SSID: &str = env!("WIFI_SSID");
@@ -28,12 +28,11 @@ const BEEP_DURATION_MS: u64 = 200;
 const BEEP_PAUSE_MS: u64 = 200;
 const PATTERN_PAUSE_MS: u64 = 500;
 
+const DEBUG_ON: bool = true;
+
 // Message types for buzzer control - updated with parameters
 enum BuzzerMessage {
-    PlayAlarm {
-        repeat_count: u8,
-        frequency: u32,
-    },
+    PlayAlarm { repeat_count: u8, frequency: u32 },
 }
 
 fn main() -> Result<()> {
@@ -122,15 +121,24 @@ fn main() -> Result<()> {
         // Check if we've entered a new hour
         if let Ok(current_time) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
             let now = current_time.as_secs();
-            let _secs = now % 60;  // Prefixed with underscore as it's now unused
+            let _secs = now % 60; // Prefixed with underscore as it's now unused
             let mins = (now / 60) % 60;
             let hours = (now / 3600) % 24;
 
             // Log current time every 5 minutes but only once per interval
-            let current_log_key = ((hours * 60 + mins) / 5) as i64; // Convert to i64 to match last_log_time
-            if current_log_key != last_log_time && mins % 5 == 0 {
+            let current_log_key = (hours * 60 + mins) as i64; // Convert to i64 to match last_log_time
+            if current_log_key != last_log_time {
                 log::info!("Current time: {:02}:{:02}", hours, mins);
                 last_log_time = current_log_key;
+
+                if DEBUG_ON {
+                    if let Err(e) = buzzer_tx.send(BuzzerMessage::PlayAlarm {
+                        repeat_count: 3,
+                        frequency: 2800,
+                    }) {
+                        log::error!("Failed to send alarm to buzzer thread: {:?}", e);
+                    }
+                }
             }
 
             // Only send alarms between 7:00 and 23:00
@@ -145,7 +153,7 @@ fn main() -> Result<()> {
                 // Set repeat count to the current hour and frequency to 2000Hz
                 if let Err(e) = buzzer_tx.send(BuzzerMessage::PlayAlarm {
                     repeat_count: hours as u8,
-                    frequency: 2000
+                    frequency: 2000,
                 }) {
                     log::error!("Failed to send alarm to buzzer thread: {:?}", e);
                 }
@@ -159,7 +167,7 @@ fn main() -> Result<()> {
                 // Send alarm message to buzzer thread with repeat count 3 and frequency 2600Hz
                 if let Err(e) = buzzer_tx.send(BuzzerMessage::PlayAlarm {
                     repeat_count: 3,
-                    frequency: 2600
+                    frequency: 2600,
                 }) {
                     log::error!("Failed to send 10-min alarm to buzzer thread: {:?}", e);
                 }
@@ -179,12 +187,19 @@ fn buzzer_control_task<T: OutputPin>(
 
     loop {
         match receiver.recv() {
-            Ok(BuzzerMessage::PlayAlarm { repeat_count, frequency }) => {
-                log::debug!("Playing alarm pattern with {} repeats at {} Hz", repeat_count, frequency);
+            Ok(BuzzerMessage::PlayAlarm {
+                repeat_count,
+                frequency,
+            }) => {
+                log::debug!(
+                    "Playing alarm pattern with {} repeats at {} Hz",
+                    repeat_count,
+                    frequency
+                );
                 if let Err(e) = play_alarm_pattern(buzzer, repeat_count, frequency) {
                     log::error!("Error playing alarm: {:?}", e);
                 }
-            },
+            }
             Err(e) => {
                 log::error!("Error receiving message in buzzer thread: {:?}", e);
                 // If channel is closed (e.g., main thread died), exit the thread
@@ -286,7 +301,7 @@ fn connect_wifi(
     modem: impl Peripheral<P = hal::modem::Modem> + 'static,
     sysloop: EspSystemEventLoop,
     ssid: &str,
-    password: &str
+    password: &str,
 ) -> Result<BlockingWifi<EspWifi<'static>>> {
     let nvs = EspDefaultNvsPartition::take()?;
 
@@ -326,7 +341,7 @@ fn setup_sntp() -> Result<EspSntp<'static>> {
         esp_idf_svc::sys::setenv(
             std::ffi::CString::new("TZ").unwrap().as_ptr(),
             tz.as_ptr(),
-            1
+            1,
         );
         esp_idf_svc::sys::tzset();
     }
