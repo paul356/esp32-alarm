@@ -10,6 +10,7 @@ use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 use esp_idf_svc::wifi::{ClientConfiguration, Configuration};
 use std::time::{Duration, SystemTime};
 use std::thread;
+use std::sync::mpsc::{self, Receiver};
 
 // Configuration for WiFi connection
 const SSID: &str = env!("WIFI_SSID");
@@ -18,8 +19,25 @@ const PASSWORD: &str = env!("WIFI_PASS");
 // Time sync interval in seconds
 const NTP_SYNC_INTERVAL: u64 = 3600; // 1 hour
 
-// GPIO pin for the buzzer
-const BUZZER_PIN: i32 = 5; // D5 on most ESP32 dev boards, adjust as needed
+// WiFi check interval in milliseconds
+const WIFI_CHECK_INTERVAL: u64 = 30000; // 30 seconds
+
+// Buzzer configuration
+const BUZZER_PIN: i32 = 5; // GPIO5 on ESP32 dev boards
+
+// Alarm pattern parameters
+const BEEP_COUNT: u8 = 1; // Changed from 3 to 1
+const BEEP_DURATION_MS: u64 = 200;
+const BEEP_PAUSE_MS: u64 = 200;
+const PATTERN_PAUSE_MS: u64 = 500;
+
+// Message types for buzzer control - updated with parameters
+enum BuzzerMessage {
+    PlayAlarm {
+        repeat_count: u8,
+        frequency: u32,
+    },
+}
 
 fn main() -> Result<()> {
     // Initialize ESP-IDF
@@ -31,16 +49,25 @@ fn main() -> Result<()> {
     // Get access to the peripherals
     let peripherals = Peripherals::take()?;
     
-    // Set up buzzer on GPIO pin
-    let pin = peripherals.pins.gpio5;
-    let mut buzzer = PinDriver::output(pin)?;
-    
     // Get the system event loop
     let sysloop = EspSystemEventLoop::take()?;
     
+    // Setup buzzer control channel and thread
+    let (buzzer_tx, buzzer_rx) = mpsc::channel();
+    
+    // Start buzzer control thread
+    thread::spawn(move || {
+        let pin = peripherals.pins.gpio5;
+        if let Ok(mut buzzer) = PinDriver::output(pin) {
+            buzzer_control_task(buzzer_rx, &mut buzzer);
+        } else {
+            log::error!("Failed to initialize buzzer pin!");
+        }
+    });
+    
     // Connect to WiFi
     log::info!("Connecting to WiFi network '{}'...", SSID);
-    let _wifi = connect_wifi(peripherals.modem, sysloop.clone(), SSID, PASSWORD)?;
+    let mut wifi = connect_wifi(peripherals.modem, sysloop.clone(), SSID, PASSWORD)?;
     
     // Configure SNTP for time synchronization
     log::info!("Setting up SNTP service...");
@@ -55,9 +82,32 @@ fn main() -> Result<()> {
     
     let mut last_sync_time = SystemTime::now();
     let mut last_hour = -1;
+    let mut last_10_min_alarm = -1;
+    let mut last_wifi_check = SystemTime::now();
+    let mut last_log_time: i64 = -1; // Track the last time we logged
     
     // Main loop
     loop {
+        // Check WiFi status periodically
+        if let Ok(elapsed) = last_wifi_check.elapsed() {
+            if elapsed.as_secs() * 1000 > WIFI_CHECK_INTERVAL {
+                if !wifi_is_connected(&wifi) {
+                    log::warn!("WiFi connection lost. Attempting to reconnect...");
+                    if let Err(e) = wifi.connect() {
+                        log::error!("Failed to reconnect to WiFi: {:?}", e);
+                    } else if let Err(e) = wifi.wait_netif_up() {
+                        log::error!("Failed to get IP address: {:?}", e);
+                    } else {
+                        let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
+                        log::info!("WiFi reconnected, IP: {}", ip_info.ip);
+                    }
+                } else {
+                    log::debug!("WiFi connection is stable");
+                }
+                last_wifi_check = SystemTime::now();
+            }
+        }
+        
         // Check if it's time to sync with NTP
         if let Ok(elapsed) = last_sync_time.elapsed() {
             if elapsed.as_secs() > NTP_SYNC_INTERVAL {
@@ -65,6 +115,9 @@ fn main() -> Result<()> {
                 // Just recreate the SNTP client instead of calling update
                 if let Ok(_) = setup_sntp() {
                     last_sync_time = SystemTime::now();
+                    log::info!("Time sync completed");
+                } else {
+                    log::error!("Time sync failed");
                 }
             }
         }
@@ -76,20 +129,155 @@ fn main() -> Result<()> {
             let mins = (now / 60) % 60;
             let hours = (now / 3600) % 24;
             
-            // Log current time every 5 minutes
-            if mins % 5 == 0 && secs < 10 {
+            // Log current time every 5 minutes but only once per interval
+            let current_log_key = ((hours * 60 + mins) / 5) as i64; // Convert to i64 to match last_log_time
+            if current_log_key != last_log_time && mins % 5 == 0 && secs < 2 {
                 log::info!("Current time: {:02}:{:02}", hours, mins);
+                last_log_time = current_log_key;
             }
             
             // Sound alarm at the start of each hour
             if hours as i32 != last_hour && mins == 0 && secs < 10 {
                 last_hour = hours as i32;
                 log::info!("ALARM! It's now {}:00", hours);
-                sound_alarm(&mut buzzer)?;
+                
+                // Send alarm message to buzzer thread
+                // Set repeat count to the current hour and frequency to 2000Hz
+                if let Err(e) = buzzer_tx.send(BuzzerMessage::PlayAlarm { 
+                    repeat_count: hours as u8, 
+                    frequency: 2000 
+                }) {
+                    log::error!("Failed to send alarm to buzzer thread: {:?}", e);
+                }
+            }
+            
+            // Sound alarm at 10 minutes past each hour
+            if hours as i32 != last_10_min_alarm && mins == 10 && secs < 10 {
+                last_10_min_alarm = hours as i32;
+                log::info!("ALARM! It's now {}:10", hours);
+                
+                // Send alarm message to buzzer thread with repeat count 3 and frequency 4000Hz
+                if let Err(e) = buzzer_tx.send(BuzzerMessage::PlayAlarm { 
+                    repeat_count: 3, 
+                    frequency: 4000 
+                }) {
+                    log::error!("Failed to send 10-min alarm to buzzer thread: {:?}", e);
+                }
             }
         }
         
         thread::sleep(Duration::from_millis(500));
+    }
+}
+
+// Buzzer control task running in separate thread
+fn buzzer_control_task<T: OutputPin>(
+    receiver: Receiver<BuzzerMessage>,
+    buzzer: &mut PinDriver<'_, T, Output>,
+) {
+    log::info!("Buzzer control thread started");
+
+    loop {
+        match receiver.recv() {
+            Ok(BuzzerMessage::PlayAlarm { repeat_count, frequency }) => {
+                log::debug!("Playing alarm pattern with {} repeats at {} Hz", repeat_count, frequency);
+                if let Err(e) = play_alarm_pattern(buzzer, repeat_count, frequency) {
+                    log::error!("Error playing alarm: {:?}", e);
+                }
+            },
+            Err(e) => {
+                log::error!("Error receiving message in buzzer thread: {:?}", e);
+                // If channel is closed (e.g., main thread died), exit the thread
+                break;
+            }
+        }
+    }
+    
+    log::info!("Buzzer control thread exiting");
+}
+
+// Play the alarm pattern with the given frequency
+fn play_alarm_pattern<T: OutputPin>(
+    buzzer: &mut PinDriver<'_, T, Output>,
+    repeat_count: u8,
+    frequency: u32,
+) -> Result<()> {
+    for _ in 0..repeat_count {
+        for _ in 0..BEEP_COUNT {
+            play_tone(buzzer, frequency, BEEP_DURATION_MS)?;
+            thread::sleep(Duration::from_millis(BEEP_PAUSE_MS));
+        }
+        thread::sleep(Duration::from_millis(PATTERN_PAUSE_MS));
+    }
+    
+    Ok(())
+}
+
+// Play a tone with the specified frequency and duration
+fn play_tone<T: OutputPin>(
+    buzzer: &mut PinDriver<'_, T, Output>,
+    freq_hz: u32,
+    duration_ms: u64,
+) -> Result<()> {
+    if freq_hz == 0 {
+        // If frequency is 0, just turn on for the duration
+        buzzer.set_high()?;
+        thread::sleep(Duration::from_millis(duration_ms));
+        buzzer.set_low()?;
+        return Ok(());
+    }
+    
+    // Calculate half-period in microseconds
+    let half_period_us: u64 = 500_000 / freq_hz as u64;
+    let start = SystemTime::now();
+    let duration_us = duration_ms * 1000;
+    
+    // Threshold below which we'll use a spin loop instead of sleep
+    // FreeRTOS tick rate typically doesn't allow sleeps below 1ms (1000us)
+    const MIN_SLEEP_THRESHOLD_US: u64 = 1000;
+    
+    let elapsed_us = || {
+        SystemTime::now()
+            .duration_since(start)
+            .unwrap_or(Duration::from_secs(0))
+            .as_micros() as u64
+    };
+    
+    // Generate waveform for the specified duration
+    while elapsed_us() < duration_us {
+        buzzer.set_high()?;
+        
+        if half_period_us >= MIN_SLEEP_THRESHOLD_US {
+            // For longer periods, sleep is efficient enough
+            thread::sleep(Duration::from_micros(half_period_us));
+        } else {
+            // For shorter periods, use a spin loop for better precision
+            let target = elapsed_us() + half_period_us;
+            while elapsed_us() < target {
+                // Busy wait (spin)
+            }
+        }
+        
+        buzzer.set_low()?;
+        
+        if half_period_us >= MIN_SLEEP_THRESHOLD_US {
+            thread::sleep(Duration::from_micros(half_period_us));
+        } else {
+            let target = elapsed_us() + half_period_us;
+            while elapsed_us() < target {
+                // Busy wait (spin)
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+// Check if WiFi is still connected
+fn wifi_is_connected<'a>(wifi: &BlockingWifi<EspWifi<'a>>) -> bool {
+    match wifi.wifi().is_connected() {
+        Ok(connected) => connected,
+        Err(_) => false,
     }
 }
 
@@ -131,23 +319,21 @@ fn connect_wifi(
 
 // Setup SNTP service for time synchronization
 fn setup_sntp() -> Result<EspSntp<'static>> {
+    // Set timezone to UTC+8
+    // For UTC+8: "CST-8" (China Standard Time, 8 hours ahead of UTC)
+    let tz = std::ffi::CString::new("CST-8").unwrap();
+    unsafe {
+        esp_idf_svc::sys::setenv(
+            std::ffi::CString::new("TZ").unwrap().as_ptr(),
+            tz.as_ptr(),
+            1
+        );
+        esp_idf_svc::sys::tzset();
+    }
+    
+    log::info!("Timezone set to UTC+8 (CST)");
+    
     let sntp = EspSntp::new_default()?;
     log::info!("SNTP initialized, waiting for time sync...");
     Ok(sntp)
-}
-
-// Sound the buzzer alarm
-fn sound_alarm<T: OutputPin>(buzzer: &mut PinDriver<'_, T, Output>) -> Result<()> {
-    // Sound pattern: 3 short beeps, pause, 3 short beeps
-    for _ in 0..2 {
-        for _ in 0..3 {
-            buzzer.set_high()?;
-            thread::sleep(Duration::from_millis(200));
-            buzzer.set_low()?;
-            thread::sleep(Duration::from_millis(200));
-        }
-        thread::sleep(Duration::from_millis(500));
-    }
-    
-    Ok(())
 }
