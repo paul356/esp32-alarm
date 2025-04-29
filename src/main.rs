@@ -28,7 +28,7 @@ const BEEP_DURATION_MS: u64 = 200;
 const BEEP_PAUSE_MS: u64 = 200;
 const PATTERN_PAUSE_MS: u64 = 500;
 
-const DEBUG_ON: bool = true;
+const DEBUG_ON: bool = false;
 
 // Message types for buzzer control - updated with parameters
 enum BuzzerMessage {
@@ -121,9 +121,12 @@ fn main() -> Result<()> {
         // Check if we've entered a new hour
         if let Ok(current_time) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
             let now = current_time.as_secs();
-            let _secs = now % 60; // Prefixed with underscore as it's now unused
-            let mins = (now / 60) % 60;
-            let hours = (now / 3600) % 24;
+
+            // Apply UTC+8 timezone adjustment
+            let now_with_tz = now + (8 * 3600); // Add 8 hours in seconds
+
+            let mins = (now_with_tz / 60) % 60;
+            let hours = (now_with_tz / 3600) % 24;
 
             // Log current time every 5 minutes but only once per interval
             let current_log_key = (hours * 60 + mins) as i64; // Convert to i64 to match last_log_time
@@ -334,20 +337,6 @@ fn connect_wifi(
 
 // Setup SNTP service for time synchronization
 fn setup_sntp() -> Result<EspSntp<'static>> {
-    // Set timezone to UTC+8
-    // For UTC+8: "CST-8" (China Standard Time, 8 hours ahead of UTC)
-    let tz = std::ffi::CString::new("CST-8").unwrap();
-    unsafe {
-        esp_idf_svc::sys::setenv(
-            std::ffi::CString::new("TZ").unwrap().as_ptr(),
-            tz.as_ptr(),
-            1,
-        );
-        esp_idf_svc::sys::tzset();
-    }
-
-    log::info!("Timezone set to UTC+8 (CST)");
-
     let sntp = EspSntp::new_default()?;
     log::info!("SNTP initialized, waiting for time sync...");
     Ok(sntp)
