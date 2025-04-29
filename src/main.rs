@@ -122,19 +122,22 @@ fn main() -> Result<()> {
         // Check if we've entered a new hour
         if let Ok(current_time) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
             let now = current_time.as_secs();
-            let secs = now % 60;
+            let _secs = now % 60;  // Prefixed with underscore as it's now unused
             let mins = (now / 60) % 60;
             let hours = (now / 3600) % 24;
 
             // Log current time every 5 minutes but only once per interval
             let current_log_key = ((hours * 60 + mins) / 5) as i64; // Convert to i64 to match last_log_time
-            if current_log_key != last_log_time && mins % 5 == 0 && secs < 2 {
+            if current_log_key != last_log_time && mins % 5 == 0 {
                 log::info!("Current time: {:02}:{:02}", hours, mins);
                 last_log_time = current_log_key;
             }
 
+            // Only send alarms between 7:00 and 23:00
+            let is_alarm_time = hours >= 7 && hours <= 23;
+
             // Sound alarm at the start of each hour
-            if hours as i32 != last_hour && mins == 0 && secs < 10 {
+            if hours as i32 != last_hour && mins == 0 && is_alarm_time {
                 last_hour = hours as i32;
                 log::info!("ALARM! It's now {}:00", hours);
 
@@ -149,14 +152,14 @@ fn main() -> Result<()> {
             }
 
             // Sound alarm at 10 minutes past each hour
-            if hours as i32 != last_10_min_alarm && mins == 10 && secs < 10 {
+            if hours as i32 != last_10_min_alarm && mins == 10 && is_alarm_time {
                 last_10_min_alarm = hours as i32;
                 log::info!("ALARM! It's now {}:10", hours);
 
-                // Send alarm message to buzzer thread with repeat count 3 and frequency 4000Hz
+                // Send alarm message to buzzer thread with repeat count 3 and frequency 2600Hz
                 if let Err(e) = buzzer_tx.send(BuzzerMessage::PlayAlarm {
                     repeat_count: 3,
-                    frequency: 4000
+                    frequency: 2600
                 }) {
                     log::error!("Failed to send 10-min alarm to buzzer thread: {:?}", e);
                 }
