@@ -76,7 +76,6 @@ fn main() -> Result<()> {
     }
     log::info!("Initial time sync complete");
 
-    let mut last_sync_time = SystemTime::now();
     let mut last_hour = -1;
     let mut last_10_min_alarm = -1;
     let mut last_wifi_check = SystemTime::now();
@@ -101,20 +100,6 @@ fn main() -> Result<()> {
                     log::debug!("WiFi connection is stable");
                 }
                 last_wifi_check = SystemTime::now();
-            }
-        }
-
-        // Check if it's time to sync with NTP
-        if let Ok(elapsed) = last_sync_time.elapsed() {
-            if elapsed.as_secs() > NTP_SYNC_INTERVAL {
-                log::info!("Performing scheduled NTP time sync");
-                // Just recreate the SNTP client instead of calling update
-                if let Ok(_) = setup_sntp() {
-                    last_sync_time = SystemTime::now();
-                    log::info!("Time sync completed");
-                } else {
-                    log::error!("Time sync failed");
-                }
             }
         }
 
@@ -148,7 +133,7 @@ fn main() -> Result<()> {
             let is_alarm_time = hours >= 7 && hours <= 23;
 
             // Sound alarm at the start of each hour
-            if hours as i32 != last_hour && mins == 0 && is_alarm_time {
+            if hours as i32 != last_hour && mins >= 0 && is_alarm_time {
                 last_hour = hours as i32;
                 log::info!("ALARM! It's now {}:00", hours);
 
@@ -163,7 +148,7 @@ fn main() -> Result<()> {
             }
 
             // Sound alarm at 10 minutes past each hour
-            if hours as i32 != last_10_min_alarm && mins == 10 && is_alarm_time {
+            if hours as i32 != last_10_min_alarm && mins >= 10 && is_alarm_time {
                 last_10_min_alarm = hours as i32;
                 log::info!("ALARM! It's now {}:10", hours);
 
